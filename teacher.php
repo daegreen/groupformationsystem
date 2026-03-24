@@ -27,11 +27,50 @@ function columnExists($conn, $table, $column) {
 }
 
 /* =======================
+   Helper: get teacher's registration window
+======================= */
+function getTeacherWindow($conn, $teacherId) {
+    $stmt = $conn->prepare("SELECT start_time, end_time FROM teacher_registration_windows WHERE teacher_id = ?");
+    $stmt->execute([$teacherId]);
+    return $stmt->fetch(PDO::FETCH_ASSOC);
+}
+
+/* =======================
    Load tables (for existence check only)
 ======================= */
 $tables = [];
 $stmt = $conn->query("SHOW TABLES");
 $tables = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+/* =======================
+   Handle Registration Window Setting
+======================= */
+$window_message = '';
+$current_window = getTeacherWindow($conn, $_SESSION['teacher_id']);
+
+if (isset($_POST['set_window'])) {
+    $start = $_POST['start_time'] ?? '';
+    $end   = $_POST['end_time'] ?? '';
+
+    if (empty($start) || empty($end)) {
+        $window_message = "<div class='alert alert-error'>❌ Please fill both start and end time.</div>";
+    } else {
+        try {
+            // Delete any existing window for this teacher
+            $del = $conn->prepare("DELETE FROM teacher_registration_windows WHERE teacher_id = ?");
+            $del->execute([$_SESSION['teacher_id']]);
+
+            // Insert new window
+            $ins = $conn->prepare("INSERT INTO teacher_registration_windows (teacher_id, start_time, end_time) VALUES (?, ?, ?)");
+            $ins->execute([$_SESSION['teacher_id'], $start, $end]);
+
+            $window_message = "<div class='alert alert-info'>✅ Registration window set successfully!</div>";
+            $current_window = ['start_time' => $start, 'end_time' => $end];
+        } catch (PDOException $e) {
+            $window_message = "<div class='alert alert-error'>❌ Database error: " . htmlspecialchars($e->getMessage()) . "</div>";
+        }
+    }
+}
 
 /* =======================
    View selected table data (only for current teacher)
@@ -63,14 +102,14 @@ if(isset($_POST['view_table'])){
                 $table_data .= "<h3>📋 Your Students in Table: <b>$selected_table</b></h3>";
                 $table_data .= "<div class='table-wrapper'>";
                 $table_data .= "<table class='data-table'>";
-                $table_data .= "<thead>
+                $table_data .= "<thead><tr>
                             <th>ID</th>
                             <th>First Name</th>
                             <th>Last Name</th>
                             <th>Reg Number</th>
                             <th>Gender</th>
                             <th>Interested</th>
-                          </thead><tbody>";
+                          </tr></thead><tbody>";
 
                 foreach($rows as $row){
                     $table_data .= "<tr>
@@ -80,10 +119,10 @@ if(isset($_POST['view_table'])){
                                         <td>".htmlspecialchars($row['reg_number'])."</td>
                                         <td>".htmlspecialchars($row['gender'])."</td>
                                         <td>".htmlspecialchars($row['interested'])."</td>
-                                      </tr>";
+                                    </tr>";
                 }
 
-                $table_data .= "</tbody>  </table></div></div>";
+                $table_data .= "</tbody></table></div></div>";
             } else {
                 $table_data = "<div class='alert alert-info'>ℹ️ No students found for you in this table.</div>";
             }
@@ -195,7 +234,7 @@ if(isset($_POST['generate'])){
                     }
 
                     $groups_html .= "</div>";
-                    // REPLACED: removed link to export_pdf.php and added print button
+                    // Print button
                     $groups_html .= "<div class='export-pdf'><button class='export-btn' onclick='window.print()'>📄 Export Groups to PDF</button></div>";
                     $groups_html .= "</div>";
                 }
@@ -319,7 +358,7 @@ if(isset($_POST['generate'])){
             color: var(--text-dark);
         }
 
-        select, input[type="number"], input[type="text"] {
+        select, input[type="number"], input[type="text"], input[type="datetime-local"] {
             width: 100%;
             padding: 0.8rem 1rem;
             border: 1px solid var(--border);
@@ -482,6 +521,7 @@ if(isset($_POST['generate'])){
         @media print {
             /* Hide everything except the groups container */
             .dashboard-header,
+            .form-card:not(:last-child), /* hide all form cards except groups container? better hide all .form-card, .alert, etc */
             .form-card,
             .alert,
             .data-section,
@@ -582,6 +622,27 @@ if(isset($_POST['generate'])){
             <span>Logged in as: <strong><?php echo htmlspecialchars($_SESSION['teacher_username'] ?? 'Teacher'); ?></strong></span>
         </div>
         <a href="logout.t.php" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+
+    <!-- Registration Window Card -->
+    <div class="form-card">
+        <h2><i class="fas fa-clock"></i> Set Registration Time Window</h2>
+        <?php echo $window_message; ?>
+        <form method="POST">
+            <div class="form-group">
+                <label>Start Time</label>
+                <input type="datetime-local" name="start_time" required
+                       value="<?php echo $current_window ? htmlspecialchars($current_window['start_time']) : ''; ?>">
+            </div>
+            <div class="form-group">
+                <label>End Time</label>
+                <input type="datetime-local" name="end_time" required
+                       value="<?php echo $current_window ? htmlspecialchars($current_window['end_time']) : ''; ?>">
+            </div>
+            <div class="form-group">
+                <button type="submit" name="set_window" class="btn"><i class="fas fa-save"></i> Save Window</button>
+            </div>
+        </form>
     </div>
 
     <!-- Smart Group Generator Card -->
