@@ -105,6 +105,15 @@ if ($teachersTableExists) {
     $teacherStmt = null;
 }
 
+// ==================== Helper: Check if teacher has valid registration window ====================
+function teacherHasValidWindow($conn, $teacherId) {
+    $now = date('Y-m-d H:i:s');
+    $stmt = $conn->prepare("SELECT id FROM teacher_registration_windows 
+                            WHERE teacher_id = ? AND start_time <= ? AND end_time >= ?");
+    $stmt->execute([$teacherId, $now, $now]);
+    return $stmt->rowCount() > 0;
+}
+
 // ==================== Handle Form Submission ====================
 $message = '';
 $messageType = '';
@@ -141,6 +150,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send'])) {
             // If the table expects a teacher, validate that a teacher was selected
             if ($hasTeacherId && empty($teacher_id)) {
                 $errors[] = "Please select a teacher for this registration.";
+            } 
+            // NEW: Check if the selected teacher has an active registration window
+            elseif ($hasTeacherId && !teacherHasValidWindow($conn, $teacher_id)) {
+                $errors[] = "Registration is only allowed during the time set by your teacher. Please contact your teacher for the registration period.";
             }
 
             if (empty($errors)) {
