@@ -7,11 +7,10 @@ $tables = [];
 $stmt = $conn->query("SHOW TABLES");
 if ($stmt) {
     $allTables = $stmt->fetchAll(PDO::FETCH_COLUMN);
-    // Exclude 'admins' and 'teachers'
     $tables = array_filter($allTables, function($table) {
         return !in_array($table, ['admins', 'teachers']);
     });
-    $tables = array_values($tables); // re-index
+    $tables = array_values($tables);
 }
 
 // ==================== Determine which tables have a teacher_id column ====================
@@ -32,30 +31,23 @@ foreach ($tables as $table) {
 $teachers = [];
 $teachersTableExists = in_array('teachers', $allTables ?? []);
 if ($teachersTableExists) {
-    // Get the structure of the teachers table
     $teacherColumns = [];
     $descStmt = $conn->query("DESCRIBE teachers");
     if ($descStmt) {
         $teacherColumns = $descStmt->fetchAll(PDO::FETCH_COLUMN);
         $descStmt = null;
     }
-
-    // Normalize column names to lowercase for comparison, but keep original for SQL
     $lowerColumns = array_map('strtolower', $teacherColumns);
     $originalColumns = $teacherColumns;
 
     $nameExpression = null;
-
-    // 1. Check for separate first_name and last_name (case-insensitive)
     $firstIndex = array_search('first_name', $lowerColumns);
     $lastIndex  = array_search('last_name', $lowerColumns);
     if ($firstIndex !== false && $lastIndex !== false) {
         $firstCol = $originalColumns[$firstIndex];
         $lastCol  = $originalColumns[$lastIndex];
         $nameExpression = "CONCAT($firstCol, ' ', $lastCol)";
-    }
-    // 2. Check for single name columns (priority order)
-    else {
+    } else {
         $singleNameCandidates = ['name', 'full_name', 'teacher_name', 'display_name'];
         foreach ($singleNameCandidates as $candidate) {
             $idx = array_search($candidate, $lowerColumns);
@@ -65,8 +57,6 @@ if ($teachersTableExists) {
             }
         }
     }
-
-    // 3. If still no name column, try to find any column that contains 'name'
     if ($nameExpression === null) {
         foreach ($lowerColumns as $idx => $colLower) {
             if (strpos($colLower, 'name') !== false) {
@@ -75,8 +65,6 @@ if ($teachersTableExists) {
             }
         }
     }
-
-    // 4. Final fallback: use the first column that is not 'id', else use 'id' with a prefix
     if ($nameExpression === null) {
         $idIndex = array_search('id', $lowerColumns);
         foreach ($originalColumns as $idx => $col) {
@@ -85,13 +73,11 @@ if ($teachersTableExists) {
                 break;
             }
         }
-        // If only 'id' exists, we'll still use it but will format later
         if ($nameExpression === null && $idIndex !== false) {
             $nameExpression = 'id';
         }
     }
 
-    // Build the query – if we are forced to use 'id', display "Teacher #id"
     if ($nameExpression === 'id') {
         $teacherSql = "SELECT id, CONCAT('Teacher #', id) AS display_name FROM teachers ORDER BY id";
     } else {
@@ -105,19 +91,24 @@ if ($teachersTableExists) {
     $teacherStmt = null;
 }
 
-// ==================== Helper: Check if teacher has valid registration window ====================
-function teacherHasValidWindow($conn, $teacherId) {
-    $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("SELECT id FROM teacher_registration_windows 
-                            WHERE teacher_id = ? AND start_time <= ? AND end_time >= ?");
-    $stmt->execute([$teacherId, $now, $now]);
-    return $stmt->rowCount() > 0;
+// ==================== Helper: Get teacher's registration window ====================
+function getTeacherWindow($conn, $teacher_id) {
+    $stmt = $conn->prepare("SELECT registration_start, registration_end FROM teachers WHERE id = ?");
+    $stmt->execute([$teacher_id]);
+    $data = $stmt->fetch(PDO::FETCH_ASSOC);
+    if ($data && !empty($data['registration_start']) && !empty($data['registration_end'])) {
+        return [
+            'start' => $data['registration_start'],
+            'end'   => $data['registration_end']
+        ];
+    }
+    return null;
 }
 
 // ==================== Handle Form Submission ====================
 $message = '';
 $messageType = '';
-// Default to 'students' if exists, otherwise first available table
+
 if (isset($_POST['table_name'])) {
     $selectedTable = $_POST['table_name'];
 } else {
@@ -144,16 +135,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send'])) {
         if (!in_array($selectedTable, $tables)) {
             $errors[] = "Selected table '$selectedTable' does not exist.";
         } else {
-            // Check for teacher_id column in the selected table
             $hasTeacherId = in_array($selectedTable, $tablesWithTeacherId);
 
-            // If the table expects a teacher, validate that a teacher was selected
-            if ($hasTeacherId && empty($teacher_id)) {
-                $errors[] = "Please select a teacher for this registration.";
-            } 
-            // NEW: Check if the selected teacher has an active registration window
-            elseif ($hasTeacherId && !teacherHasValidWindow($conn, $teacher_id)) {
-                $errors[] = "Registration is only allowed during the time set by your teacher. Please contact your teacher for the registration period.";
+            if ($hasTeacherId) {
+                if (empty($teacher_id)) {
+                    $errors[] = "Please select a teacher for this registration.";
+                } else {
+                    $window = getTeacherWindow($conn, $teacher_id);
+                    if ($window === null) {
+                        $errors[] = "Teacher has not set a registration window. Please contact the teacher.";
+                    } else {
+                        $now = new DateTime();
+                        $start = new DateTime($window['start']);
+                        $end   = new DateTime($window['end']);
+                        
+                        if ($now < $start) {
+                            $errors[] = "Registration has not started yet. It will begin at " . $start->format('Y-m-d H:i') . ". Server current time is " . $now->format('Y-m-d H:i') . ".";
+                        } elseif ($now > $end) {
+                            $errors[] = "Registration window has closed. It ended at " . $end->format('Y-m-d H:i') . ". Server current time is " . $now->format('Y-m-d H:i') . ".";
+                        }
+                    }
+                }
             }
 
             if (empty($errors)) {
@@ -257,7 +259,6 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     exit();
 }
 
-// Get current database name for footer
 $dbName = $conn->query("SELECT DATABASE()")->fetchColumn() ?? 'unknown';
 ?>
 <!DOCTYPE html>
@@ -268,19 +269,17 @@ $dbName = $conn->query("SELECT DATABASE()")->fetchColumn() ?? 'unknown';
 <title>Student Registration · Adaptive Form</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
 <style>
-/* ----- RESET & GLOBAL ----- */
+/* ... (keep all existing CSS exactly as before) ... */
 * {
     margin: 0;
     padding: 0;
     box-sizing: border-box;
     -webkit-tap-highlight-color: transparent;
 }
-
 html {
     font-size: 16px;
     scroll-behavior: smooth;
 }
-
 body {
     background: linear-gradient(135deg, #e3f0fc 0%, #cbe4f5 100%);
     font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, sans-serif;
@@ -290,15 +289,11 @@ body {
     justify-content: center;
     padding: clamp(0.5rem, 3vw, 1.5rem);
 }
-
-/* ----- MAIN CONTAINER (ULTRA RESPONSIVE) ----- */
 .app-container {
     width: 100%;
     max-width: 780px;
     margin: 0 auto;
 }
-
-/* ----- FORM CARD (RESILIENT) ----- */
 .form-card {
     background: #ffffff;
     border-radius: clamp(1rem, 5vw, 2rem);
@@ -307,14 +302,11 @@ body {
     transition: all 0.2s ease;
     border: 1px solid rgba(255, 255, 255, 0.5);
 }
-
-/* ----- HEADER + TOP BAR (integrated back button) ----- */
 .header {
     background: #0f2b3f;
     color: white;
     padding: clamp(1rem, 4vw, 1.8rem);
 }
-
 .top-bar {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -322,7 +314,6 @@ body {
     align-items: start;
     margin-bottom: 1rem;
 }
-
 .back-home-btn {
     background: rgba(255, 255, 255, 0.15);
     backdrop-filter: blur(4px);
@@ -339,16 +330,13 @@ body {
     border: 1px solid rgba(255, 255, 255, 0.25);
     white-space: nowrap;
 }
-
 .back-home-btn:hover {
     background: rgba(255, 255, 255, 0.28);
     transform: translateY(-1px);
 }
-
 .title-section {
     text-align: right;
 }
-
 .title-section h1 {
     font-size: clamp(1.3rem, 6vw, 2.2rem);
     font-weight: 700;
@@ -359,19 +347,15 @@ body {
     gap: 0.5rem;
     line-height: 1.2;
 }
-
 .title-section p {
     font-size: clamp(0.75rem, 3.5vw, 1rem);
     opacity: 0.85;
     margin-top: 0.2rem;
 }
-
-/* ----- FORM CONTAINER ----- */
 .form-container {
     padding: clamp(1rem, 5vw, 2.5rem);
     background: white;
 }
-
 .inner-card {
     background: #fafeff;
     border-radius: 1.8rem;
@@ -379,7 +363,6 @@ body {
     border: 1px solid #cde2f2;
     transition: all 0.2s ease;
 }
-
 .inner-card h2 {
     color: #0f2b3f;
     font-size: clamp(1.2rem, 5vw, 1.8rem);
@@ -390,8 +373,6 @@ body {
     border-left: 5px solid #2a7f6b;
     padding-left: 1rem;
 }
-
-/* ----- INPUT GROUPS (touch friendly) ----- */
 .input-group {
     display: flex;
     align-items: center;
@@ -403,19 +384,16 @@ body {
     transition: 0.15s;
     width: 100%;
 }
-
 .input-group:focus-within {
     border-color: #2a7f6b;
     box-shadow: 0 0 0 3px rgba(42, 127, 107, 0.2);
 }
-
 .input-group i {
     color: #1e4b6e;
     width: 28px;
     font-size: 1.1rem;
     flex-shrink: 0;
 }
-
 .input-group input,
 .input-group select {
     width: 100%;
@@ -427,7 +405,6 @@ body {
     font-family: inherit;
     font-weight: 500;
 }
-
 .input-group select {
     cursor: pointer;
     appearance: none;
@@ -436,8 +413,6 @@ body {
     background-position: right 0.8rem center;
     background-size: 1rem;
 }
-
-/* submit button */
 .submit-btn {
     background: #2a7f6b;
     color: white;
@@ -456,13 +431,10 @@ body {
     gap: 0.6rem;
     box-shadow: 0 6px 14px -8px #094334;
 }
-
 .submit-btn:hover {
     background: #1e9a80;
     transform: scale(1.01);
 }
-
-/* message area */
 .status-message {
     background: #e3f5ef;
     border-radius: 2rem;
@@ -476,20 +448,16 @@ body {
     font-size: 0.95rem;
     line-height: 1.4;
 }
-
 .status-message.error {
     background: #ffe8e8;
     color: #bc4747;
     border-left-color: #d9534f;
 }
-
 .status-message.info {
     background: #eef3fc;
     color: #1e5f7a;
     border-left-color: #398eac;
 }
-
-/* footer */
 .footer-note {
     background: #ecf5fd;
     padding: 0.9rem 1.5rem;
@@ -503,8 +471,6 @@ body {
     gap: 0.5rem;
     flex-wrap: wrap;
 }
-
-/* RESPONSIVE ADJUSTMENTS */
 @media (max-width: 600px) {
     .top-bar {
         grid-template-columns: 1fr;
@@ -530,7 +496,6 @@ body {
         font-size: 0.95rem;
     }
 }
-
 @media (max-width: 480px) {
     body {
         padding: 0.5rem;
@@ -563,7 +528,6 @@ body {
         padding: 0.7rem;
     }
 }
-
 @media (orientation: landscape) and (max-height: 500px) {
     body {
         align-items: flex-start;
@@ -585,13 +549,9 @@ body {
         margin-bottom: 0.7rem;
     }
 }
-
-/* touch improvements */
 select, input, .action-btn, .submit-btn {
     touch-action: manipulation;
 }
-
-/* overflow safety */
 pre, code, .status-message {
     white-space: normal;
     word-wrap: break-word;
@@ -636,7 +596,6 @@ pre, code, .status-message {
                         </select>
                     </div>
 
-                    <!-- Teacher dropdown – shown only if selected table has teacher_id column -->
                     <div id="teacherFieldWrapper" style="display: none;">
                         <div class="input-group">
                             <i class="fas fa-chalkboard-user"></i>
@@ -694,7 +653,6 @@ pre, code, .status-message {
         const teacherWrapper = document.getElementById('teacherFieldWrapper');
         const teacherSelect = document.getElementById('teacherSelect');
 
-        // List of tables that have a teacher_id column (passed from PHP)
         const tablesWithTeacherId = <?php echo json_encode($tablesWithTeacherId); ?>;
 
         function toggleTeacherField() {
@@ -705,17 +663,13 @@ pre, code, .status-message {
             } else {
                 teacherWrapper.style.display = 'none';
                 teacherSelect.required = false;
-                teacherSelect.value = ''; // clear any previously selected teacher
+                teacherSelect.value = '';
             }
         }
 
-        // Initial toggle on page load
         toggleTeacherField();
-
-        // Toggle when table selection changes
         tableSelect.addEventListener('change', toggleTeacherField);
 
-        // Optional: confirm short registration number
         if (form) {
             form.addEventListener('submit', function(e) {
                 const regNumber = form.querySelector('[name="reg_number"]').value.trim();
