@@ -2,6 +2,23 @@
 session_start();
 require_once 'conn.php'; // Must return a PDO object named $conn
 
+// ==================== Ensure student_groups table exists ====================
+$groupTableCheck = $conn->query("SHOW TABLES LIKE 'student_groups'");
+if ($groupTableCheck->rowCount() == 0) {
+    $conn->exec("CREATE TABLE `student_groups` (
+        `id` int(11) NOT NULL AUTO_INCREMENT,
+        `student_id` int(11) NOT NULL,
+        `group_number` int(11) NOT NULL,
+        `chief` tinyint(1) NOT NULL DEFAULT 0,
+        `teacher_id` int(11) NOT NULL,
+        `table_name` varchar(255) NOT NULL,
+        `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (`id`),
+        KEY `student_id` (`student_id`),
+        KEY `teacher_id` (`teacher_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+}
+
 // ==================== Get all tables (exclude admins and teachers) ====================
 $tables = [];
 $stmt = $conn->query("SHOW TABLES");
@@ -259,6 +276,47 @@ if (isset($_GET['export']) && $_GET['export'] === 'csv') {
     exit();
 }
 
+// ==================== Handle Group View ====================
+$groupInfo = '';
+if (isset($_POST['view_group'])) {
+    $reg_number = trim($_POST['reg_number_view'] ?? '');
+    if (empty($reg_number)) {
+        $groupInfo = "<div class='status-message error'>❌ Please enter your registration number.</div>";
+    } else {
+        // Assume groups are stored for the 'students' table only
+        $studentStmt = $conn->prepare("SELECT id FROM students WHERE reg_number = ?");
+        $studentStmt->execute([$reg_number]);
+        $student = $studentStmt->fetch(PDO::FETCH_ASSOC);
+        if (!$student) {
+            $groupInfo = "<div class='status-message error'>❌ No student found with that registration number.</div>";
+        } else {
+            $groupStmt = $conn->prepare("SELECT group_number, chief, teacher_id FROM student_groups WHERE student_id = ? AND table_name = 'students'");
+            $groupStmt->execute([$student['id']]);
+            $groupData = $groupStmt->fetch(PDO::FETCH_ASSOC);
+            if (!$groupData) {
+                $groupInfo = "<div class='status-message info'>ℹ️ You have not been assigned to a group yet. Please check later.</div>";
+            } else {
+                $membersStmt = $conn->prepare("SELECT sg.student_id, s.first_name, s.last_name, sg.chief 
+                                                FROM student_groups sg 
+                                                JOIN students s ON sg.student_id = s.id 
+                                                WHERE sg.group_number = ? AND sg.teacher_id = ? AND sg.table_name = 'students' 
+                                                ORDER BY sg.chief DESC, s.first_name");
+                $membersStmt->execute([$groupData['group_number'], $groupData['teacher_id']]);
+                $members = $membersStmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                $groupInfo = "<div class='group-view-card'>";
+                $groupInfo .= "<h3>📌 Your Group: Group {$groupData['group_number']}</h3>";
+                $groupInfo .= "<div class='group-members'>";
+                foreach ($members as $member) {
+                    $icon = $member['chief'] ? '👑 ' : '👤 ';
+                    $groupInfo .= "<div class='member'>$icon " . htmlspecialchars($member['first_name'] . ' ' . $member['last_name']) . "</div>";
+                }
+                $groupInfo .= "</div></div>";
+            }
+        }
+    }
+}
+
 $dbName = $conn->query("SELECT DATABASE()")->fetchColumn() ?? 'unknown';
 ?>
 <!DOCTYPE html>
@@ -471,6 +529,42 @@ body {
     gap: 0.5rem;
     flex-wrap: wrap;
 }
+/* New styles for group view card */
+.group-view-card {
+    background: #f9fefb;
+    border-radius: 1.5rem;
+    padding: 1rem 1.5rem;
+    margin-top: 1rem;
+    border-left: 5px solid #2a7f6b;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+}
+.group-view-card h3 {
+    color: #0f2b3f;
+    margin-bottom: 0.8rem;
+    font-size: 1.2rem;
+}
+.group-members {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+}
+.group-members .member {
+    padding: 0.2rem 0;
+    font-size: 0.95rem;
+}
+.view-group-btn {
+    background: #2c8b70;
+    color: white;
+    border: none;
+    padding: 0.7rem 1.2rem;
+    border-radius: 2rem;
+    font-weight: 600;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1rem;
+}
 @media (max-width: 600px) {
     .top-bar {
         grid-template-columns: 1fr;
@@ -637,6 +731,21 @@ pre, code, .status-message {
                         <i class="fas fa-paper-plane"></i> Register Student
                     </button>
                 </form>
+            </div>
+
+            <!-- NEW: View My Group Section -->
+            <div class="inner-card" style="margin-top: 2rem;">
+                <h2><i class="fas fa-users-viewfinder"></i> View My Group</h2>
+                <form method="POST" action="">
+                    <div class="input-group">
+                        <i class="fas fa-id-card"></i>
+                        <input type="text" name="reg_number_view" placeholder="Enter your registration number" required>
+                    </div>
+                    <button type="submit" name="view_group" class="view-group-btn">
+                        <i class="fas fa-eye"></i> View Group
+                    </button>
+                </form>
+                <?php if (!empty($groupInfo)) echo $groupInfo; ?>
             </div>
         </div>
 
