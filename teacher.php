@@ -43,6 +43,25 @@ if (!in_array('registration_end', $teacherColumns)) {
 }
 
 /* =======================
+   Ensure student_groups table exists
+======================= */
+$groupTableCheck = $conn->query("SHOW TABLES LIKE 'student_groups'");
+if ($groupTableCheck->rowCount() == 0) {
+    $conn->exec("CREATE TABLE `student_groups` (
+        `id` int(11) NOT NULL AUTO_INCREMENT,
+        `student_id` int(11) NOT NULL,
+        `group_number` int(11) NOT NULL,
+        `chief` tinyint(1) NOT NULL DEFAULT 0,
+        `teacher_id` int(11) NOT NULL,
+        `table_name` varchar(255) NOT NULL,
+        `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (`id`),
+        KEY `student_id` (`student_id`),
+        KEY `teacher_id` (`teacher_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+}
+
+/* =======================
    Load tables (for existence check only)
 ======================= */
 $tables = [];
@@ -132,24 +151,24 @@ if(isset($_POST['view_table'])){
                 $table_data .= "<h3>📋 Your Students in Table: <b>$selected_table</b></h3>";
                 $table_data .= "<div class='table-wrapper'>";
                 $table_data .= "<table class='data-table'>";
-                $table_data .= "<thead><tr>
+                $table_data .= "<thead>得到
                             <th>ID</th>
                             <th>First Name</th>
                             <th>Last Name</th>
                             <th>Reg Number</th>
                             <th>Gender</th>
                             <th>Interested</th>
-                          </tr></thead><tbody>";
+                           </thead><tbody>";
 
                 foreach($rows as $row){
                     $table_data .= "<tr>
-                                         <td>".htmlspecialchars($row['id'])."</td>
-                                         <td>".htmlspecialchars($row['first_name'])."</td>
-                                         <td>".htmlspecialchars($row['last_name'])."</td>
-                                         <td>".htmlspecialchars($row['reg_number'])."</td>
-                                         <td>".htmlspecialchars($row['gender'])."</td>
-                                         <td>".htmlspecialchars($row['interested'])."</td>
-                                       </tr>";
+                                          <td>".htmlspecialchars($row['id'])."</td>
+                                          <td>".htmlspecialchars($row['first_name'])."</td>
+                                          <td>".htmlspecialchars($row['last_name'])."</td>
+                                          <td>".htmlspecialchars($row['reg_number'])."</td>
+                                          <td>".htmlspecialchars($row['gender'])."</td>
+                                          <td>".htmlspecialchars($row['interested'])."</td>
+                                        </tr>";
                 }
 
                 $table_data .= "</tbody></table></div></div>";
@@ -227,6 +246,31 @@ if(isset($_POST['generate'])){
 
                     $_SESSION['groups'] = $groups;
 
+                    // ----- Save groups to database -----
+                    // Delete previous assignments for this teacher and table 'students'
+                    $deleteStmt = $conn->prepare("DELETE FROM student_groups WHERE teacher_id = ? AND table_name = ?");
+                    $deleteStmt->execute([$_SESSION['teacher_id'], 'students']);
+                    
+                    $insertStmt = $conn->prepare("INSERT INTO student_groups (student_id, group_number, chief, teacher_id, table_name) VALUES (?, ?, ?, ?, ?)");
+                    foreach ($groups as $group_num => $group) {
+                        // Determine chief for this group
+                        $chief = null;
+                        foreach ($group as $student) {
+                            if (strtolower(trim($student['interested'])) == 'yes') {
+                                $chief = $student;
+                                break;
+                            }
+                        }
+                        if (!$chief && !empty($group)) $chief = $group[0];
+                        
+                        // Insert each member
+                        foreach ($group as $student) {
+                            $isChief = ($chief && $student['id'] == $chief['id']) ? 1 : 0;
+                            $insertStmt->execute([$student['id'], $group_num+1, $isChief, $_SESSION['teacher_id'], 'students']);
+                        }
+                    }
+                    // ----- End save -----
+
                     $groups_html .= "<div class='groups-container'>";
                     $groups_html .= "<h2>🎯 Generated Groups</h2>";
                     $groups_html .= "<div class='groups-grid'>";
@@ -257,6 +301,7 @@ if(isset($_POST['generate'])){
 
                     $groups_html .= "</div>";
                     $groups_html .= "<div class='export-pdf'><button class='export-btn' onclick='window.print()'>📄 Export Groups to PDF</button></div>";
+                    $groups_html .= "<div class='alert alert-info' style='margin-top:1rem;'>✅ Groups have been saved to the database. Students can now view their groups.</div>";
                     $groups_html .= "</div>";
                 }
             }
