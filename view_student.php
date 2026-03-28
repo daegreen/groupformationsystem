@@ -105,13 +105,41 @@ if ($teachersTableExists) {
     $teacherStmt = null;
 }
 
-// ==================== Helper: Check if teacher has valid registration window ====================
+// ==================== Helper: Check if teacher has an active registration window ====================
 function teacherHasValidWindow($conn, $teacherId) {
+    // Check if teachers table exists (it should, but just in case)
+    $checkTable = $conn->query("SHOW TABLES LIKE 'teachers'");
+    if ($checkTable->rowCount() == 0) {
+        return false;
+    }
+
+    // Check if registration_start and registration_end columns exist
+    $colStmt = $conn->query("DESCRIBE teachers");
+    if (!$colStmt) return false;
+    $columns = $colStmt->fetchAll(PDO::FETCH_COLUMN);
+    $hasStart = in_array('registration_start', $columns);
+    $hasEnd = in_array('registration_end', $columns);
+    if (!$hasStart || !$hasEnd) {
+        // Columns missing → cannot set windows → block registration
+        return false;
+    }
+
+    // Retrieve the registration window for this teacher
+    $stmt = $conn->prepare("SELECT registration_start, registration_end FROM teachers WHERE id = ?");
+    $stmt->execute([$teacherId]);
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$row) return false; // teacher not found
+
+    $start = $row['registration_start'];
+    $end = $row['registration_end'];
+
+    // If either value is NULL, no window is set → block
+    if (is_null($start) || is_null($end)) {
+        return false;
+    }
+
     $now = date('Y-m-d H:i:s');
-    $stmt = $conn->prepare("SELECT id FROM teacher_registration_windows 
-                            WHERE teacher_id = ? AND start_time <= ? AND end_time >= ?");
-    $stmt->execute([$teacherId, $now, $now]);
-    return $stmt->rowCount() > 0;
+    return ($now >= $start && $now <= $end);
 }
 
 // ==================== Handle Form Submission ====================
@@ -151,7 +179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['send'])) {
             if ($hasTeacherId && empty($teacher_id)) {
                 $errors[] = "Please select a teacher for this registration.";
             } 
-            // NEW: Check if the selected teacher has an active registration window
+            // Check if the selected teacher has an active registration window
             elseif ($hasTeacherId && !teacherHasValidWindow($conn, $teacher_id)) {
                 $errors[] = "Registration is only allowed during the time set by your teacher. Please contact your teacher for the registration period.";
             }
