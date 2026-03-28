@@ -1,5 +1,3 @@
-Here is an HTML document that enhances the "About" modal with superior responsiveness across all device sizes and orientations.
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -744,14 +742,7 @@ Here is an HTML document that enhances the "About" modal with superior responsiv
                     <i class="fas fa-user-cog"></i>
                     <span><strong>Admin:</strong> full system oversight, user analytics, and group audit logs</span>
                 </div>
-                <div class="feature-item">
-                    <i class="fas fa-chart-line"></i>
-                    <span><strong>Smart Matching:</strong> AI-powered group recommendations based on skills and interests</span>
-                </div>
-                <div class="feature-item">
-                    <i class="fas fa-comments"></i>
-                    <span><strong>Real-time Collaboration:</strong> chat, file sharing, and project tracking integrated</span>
-                </div>
+            
             </div>
             <p>📌 <strong>Version 2.0 (Ultra responsive)</strong> | Developed by Group 5</p>
             <p><i class="fas fa-envelope"></i> norbertmucyo@gmail.com | <i class="fas fa-globe"></i> www.groupformation.infinityfree.me</p>
@@ -865,4 +856,3 @@ Here is an HTML document that enhances the "About" modal with superior responsiv
 
 </body>
 </html>
-```
