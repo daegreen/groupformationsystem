@@ -43,7 +43,7 @@ if (!in_array('registration_end', $teacherColumns)) {
 }
 
 /* =======================
-   Ensure student_groups table exists
+   Ensure student_groups table exists with additional columns
 ======================= */
 $groupTableCheck = $conn->query("SHOW TABLES LIKE 'student_groups'");
 if ($groupTableCheck->rowCount() == 0) {
@@ -52,6 +52,7 @@ if ($groupTableCheck->rowCount() == 0) {
         `student_id` int(11) NOT NULL,
         `group_number` int(11) NOT NULL,
         `chief` tinyint(1) NOT NULL DEFAULT 0,
+        `role` varchar(100) DEFAULT NULL,
         `teacher_id` int(11) NOT NULL,
         `table_name` varchar(255) NOT NULL,
         `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -59,6 +60,12 @@ if ($groupTableCheck->rowCount() == 0) {
         KEY `student_id` (`student_id`),
         KEY `teacher_id` (`teacher_id`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+} else {
+    // Check if role column exists, if not add it
+    $roleCheck = $conn->query("SHOW COLUMNS FROM student_groups LIKE 'role'");
+    if ($roleCheck->rowCount() == 0) {
+        $conn->exec("ALTER TABLE student_groups ADD COLUMN `role` varchar(100) DEFAULT NULL");
+    }
 }
 
 /* =======================
@@ -77,7 +84,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_window'])) {
     $end   = trim($_POST['registration_end'] ?? '');
     
     if (!empty($start) && !empty($end)) {
-        // Convert from datetime-local to MySQL datetime format
         $start_dt = date('Y-m-d H:i:s', strtotime($start));
         $end_dt   = date('Y-m-d H:i:s', strtotime($end));
         
@@ -92,7 +98,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_window'])) {
             $window_message = "<div class='alert alert-error'>❌ Start time must be before end time.</div>";
         }
     } else {
-        // Clear the window
         $stmt = $conn->prepare("UPDATE teachers SET registration_start = NULL, registration_end = NULL WHERE id = ?");
         if ($stmt->execute([$_SESSION['teacher_id']])) {
             $window_message = "<div class='alert alert-info'>⏲️ Registration window cleared.</div>";
@@ -119,13 +124,12 @@ if ($teacherData) {
     }
 }
 
-// ==================== Get server current time for display ====================
 $serverNow = new DateTime();
 $serverNowFormatted = $serverNow->format('Y-m-d H:i:s');
 $timezone = date_default_timezone_get();
 
 /* =======================
-   View selected table data (only for current teacher)
+   View selected table data
 ======================= */
 $table_data = '';
 $selected_table = 'students';
@@ -151,24 +155,19 @@ if(isset($_POST['view_table'])){
                 $table_data .= "<h3>📋 Your Students in Table: <b>$selected_table</b></h3>";
                 $table_data .= "<div class='table-wrapper'>";
                 $table_data .= "<table class='data-table'>";
-                $table_data .= "<thead>得到
-                            <th>ID</th>
-                            <th>First Name</th>
-                            <th>Last Name</th>
-                            <th>Reg Number</th>
-                            <th>Gender</th>
-                            <th>Interested</th>
-                           </thead><tbody>";
+                $table_data .= "<thead><tr><th>ID</th><th>First Name</th><th>Last Name</th><th>Reg Number</th><th>Gender</th><th>Interested</th><th>Skills/Interests</th></tr></thead><tbody>";
 
                 foreach($rows as $row){
+                    $skills = $row['skills'] ?? ($row['interests'] ?? 'Not specified');
                     $table_data .= "<tr>
-                                          <td>".htmlspecialchars($row['id'])."</td>
-                                          <td>".htmlspecialchars($row['first_name'])."</td>
-                                          <td>".htmlspecialchars($row['last_name'])."</td>
-                                          <td>".htmlspecialchars($row['reg_number'])."</td>
-                                          <td>".htmlspecialchars($row['gender'])."</td>
-                                          <td>".htmlspecialchars($row['interested'])."</td>
-                                        </tr>";
+                                            <td>".htmlspecialchars($row['id'])."</td>
+                                            <td>".htmlspecialchars($row['first_name'])."</td>
+                                            <td>".htmlspecialchars($row['last_name'])."</td>
+                                            <td>".htmlspecialchars($row['reg_number'])."</td>
+                                            <td>".htmlspecialchars($row['gender'])."</td>
+                                            <td>".htmlspecialchars($row['interested'])."</td>
+                                            <td>".htmlspecialchars($skills)."</td>
+                                          </tr>";
                 }
 
                 $table_data .= "</tbody></table></div></div>";
@@ -182,9 +181,21 @@ if(isset($_POST['view_table'])){
 }
 
 /* =======================
-   Smart Group Generation (only for current teacher)
+   Smart Group Generation with Conditions
 ======================= */
 $groups_html = '';
+
+// Define available roles for group members (kept for compatibility, but not used)
+$available_roles = [
+    'Project Manager' => '📋 Leads the project, coordinates tasks',
+    'Technical Lead' => '💻 Oversees technical implementation',
+    'Researcher' => '🔍 Handles research and documentation',
+    'Designer' => '🎨 Manages UI/UX and visual elements',
+    'Communicator' => '📢 Handles presentations and communication',
+    'Quality Analyst' => '✅ Ensures quality and testing',
+    'Data Analyst' => '📊 Analyzes data and metrics',
+    'Writer' => '✍️ Documentation and report writing'
+];
 
 if(isset($_POST['generate'])){
     if (!isset($_POST['group_size']) || trim($_POST['group_size']) === '') {
@@ -192,6 +203,8 @@ if(isset($_POST['generate'])){
     } else {
         $size = (int)$_POST['group_size'];
         $selected_table = 'students';
+        $grouping_method = $_POST['grouping_method'] ?? 'balanced';
+        $condition_type = $_POST['condition_type'] ?? 'all';
 
         if($size < 2 || $size > 10){
             $groups_html = "<div class='alert alert-error'>❌ Group size must be 2-10</div>";
@@ -199,106 +212,206 @@ if(isset($_POST['generate'])){
         else if(in_array($selected_table, $tables)){
             $hasTeacherId = columnExists($conn, $selected_table, 'teacher_id');
             if (!$hasTeacherId) {
-                $groups_html = "<div class='alert alert-error'>❌ Table '$selected_table' does not have a teacher_id column. Cannot filter by teacher.</div>";
+                $groups_html = "<div class='alert alert-error'>❌ Table '$selected_table' does not have a teacher_id column.</div>";
             } else {
+                // Fetch students with additional fields
                 $hasStatus = columnExists($conn, $selected_table, 'status');
+                $hasSkills = columnExists($conn, $selected_table, 'skills');
+                $hasInterests = columnExists($conn, $selected_table, 'interests');
+                $hasGender = columnExists($conn, $selected_table, 'gender');
+                
                 if ($hasStatus) {
                     $stmt = $conn->prepare("SELECT * FROM `$selected_table` WHERE teacher_id = ? AND status = 'Active'");
                 } else {
                     $stmt = $conn->prepare("SELECT * FROM `$selected_table` WHERE teacher_id = ?");
                 }
                 $stmt->execute([$_SESSION['teacher_id']]);
-                $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-                if(count($rows) == 0){
-                    $groups_html = "<div class='alert alert-info'>ℹ️ No students found for you to generate groups.</div>";
-                } else {
-                    $interested = [];
-                    $others = [];
-
-                    foreach($rows as $row){
-                        if(strtolower(trim($row['interested'])) == 'yes'){
-                            $interested[] = $row;
-                        } else {
-                            $others[] = $row;
+                $all_students = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                
+                // Apply condition filtering based on teacher's selection
+                $filtered_students = [];
+                foreach($all_students as $student){
+                    $include = true;
+                    
+                    if($condition_type === 'interested_only'){
+                        if(strtolower(trim($student['interested'] ?? '')) != 'yes'){
+                            $include = false;
+                        }
+                    } elseif($condition_type === 'not_interested'){
+                        if(strtolower(trim($student['interested'] ?? '')) == 'yes'){
+                            $include = false;
                         }
                     }
-
-                    shuffle($interested);
-                    shuffle($others);
-
-                    $total_students = count($interested)+count($others);
-                    $group_count = ceil($total_students/$size);
-
-                    $groups = array_fill(0,$group_count,[]);
-
-                    $i=0;
-                    foreach($interested as $student){
+                    
+                    if($include){
+                        $filtered_students[] = $student;
+                    }
+                }
+                
+                if(count($filtered_students) == 0){
+                    $groups_html = "<div class='alert alert-info'>ℹ️ No students match the selected conditions.</div>";
+                } else {
+                    // Grouping Logic based on selected method
+                    $students_for_grouping = $filtered_students;
+                    shuffle($students_for_grouping); // Initial randomization
+                    
+                    // Different grouping strategies
+                    if($grouping_method === 'gender_balanced'){
+                        // Separate by gender and interleave
+                        $males = array_filter($students_for_grouping, function($s) use ($hasGender) {
+                            return strtolower(trim($s['gender'] ?? '')) == 'male';
+                        });
+                        $females = array_filter($students_for_grouping, function($s) use ($hasGender) {
+                            return strtolower(trim($s['gender'] ?? '')) == 'female';
+                        });
+                        $others = array_filter($students_for_grouping, function($s) use ($hasGender) {
+                            $g = strtolower(trim($s['gender'] ?? ''));
+                            return $g != 'male' && $g != 'female';
+                        });
+                        
+                        $balanced = [];
+                        $maxCount = max(count($males), count($females));
+                        for($i = 0; $i < $maxCount; $i++){
+                            if(isset($males[$i])) $balanced[] = $males[$i];
+                            if(isset($females[$i])) $balanced[] = $females[$i];
+                        }
+                        $balanced = array_merge($balanced, $others);
+                        $students_for_grouping = $balanced;
+                    } elseif($grouping_method === 'interest_based'){
+                        // Group similar interests together first
+                        $interest_groups = [];
+                        foreach($students_for_grouping as $student){
+                            $interest = strtolower(trim($student['interested'] ?? $student['skills'] ?? 'general'));
+                            if(!isset($interest_groups[$interest])){
+                                $interest_groups[$interest] = [];
+                            }
+                            $interest_groups[$interest][] = $student;
+                        }
+                        $students_for_grouping = [];
+                        foreach($interest_groups as $group){
+                            $students_for_grouping = array_merge($students_for_grouping, $group);
+                        }
+                    }
+                    
+                    $total_students = count($students_for_grouping);
+                    $group_count = ceil($total_students / $size);
+                    
+                    $groups = array_fill(0, $group_count, []);
+                    
+                    // Distribute students using round-robin for balanced groups
+                    $i = 0;
+                    foreach($students_for_grouping as $student){
                         $groups[$i % $group_count][] = $student;
                         $i++;
                     }
-
-                    $i=0;
-                    foreach($others as $student){
-                        $groups[$i % $group_count][] = $student;
-                        $i++;
+                    
+                    // Rebalance groups based on leadership potential (students marked as interested)
+                    // Identify students who want to be leaders
+                    $leaders = [];
+                    $non_leaders = [];
+                    foreach($students_for_grouping as $student){
+                        if(strtolower(trim($student['interested'] ?? '')) == 'yes'){
+                            $leaders[] = $student;
+                        } else {
+                            $non_leaders[] = $student;
+                        }
                     }
-
+                    
+                    // Ensure each group has at least one leader if possible
+                    if(count($leaders) >= $group_count){
+                        // Redistribute to put one leader per group
+                        $temp_groups = array_fill(0, $group_count, []);
+                        for($j = 0; $j < $group_count; $j++){
+                            if(isset($leaders[$j])){
+                                $temp_groups[$j][] = $leaders[$j];
+                            }
+                        }
+                        $remaining_students = array_slice($leaders, $group_count);
+                        $remaining_students = array_merge($remaining_students, $non_leaders);
+                        $k = 0;
+                        foreach($remaining_students as $student){
+                            $temp_groups[$k % $group_count][] = $student;
+                            $k++;
+                        }
+                        $groups = $temp_groups;
+                    }
+                    
                     $_SESSION['groups'] = $groups;
-
-                    // ----- Save groups to database -----
-                    // Delete previous assignments for this teacher and table 'students'
+                    
+                    // Save groups to database (roles are not assigned)
                     $deleteStmt = $conn->prepare("DELETE FROM student_groups WHERE teacher_id = ? AND table_name = ?");
                     $deleteStmt->execute([$_SESSION['teacher_id'], 'students']);
                     
-                    $insertStmt = $conn->prepare("INSERT INTO student_groups (student_id, group_number, chief, teacher_id, table_name) VALUES (?, ?, ?, ?, ?)");
+                    $insertStmt = $conn->prepare("INSERT INTO student_groups (student_id, group_number, chief, role, teacher_id, table_name) VALUES (?, ?, ?, ?, ?, ?)");
+                    
                     foreach ($groups as $group_num => $group) {
-                        // Determine chief for this group
+                        // Determine chief (leader) - first interested student or first in group
                         $chief = null;
                         foreach ($group as $student) {
-                            if (strtolower(trim($student['interested'])) == 'yes') {
+                            if (strtolower(trim($student['interested'] ?? '')) == 'yes') {
                                 $chief = $student;
                                 break;
                             }
                         }
                         if (!$chief && !empty($group)) $chief = $group[0];
                         
-                        // Insert each member
                         foreach ($group as $student) {
                             $isChief = ($chief && $student['id'] == $chief['id']) ? 1 : 0;
-                            $insertStmt->execute([$student['id'], $group_num+1, $isChief, $_SESSION['teacher_id'], 'students']);
+                            $insertStmt->execute([
+                                $student['id'], 
+                                $group_num+1, 
+                                $isChief, 
+                                null, // role is null
+                                $_SESSION['teacher_id'], 
+                                'students'
+                            ]);
                         }
                     }
-                    // ----- End save -----
-
+                    
+                    // Generate HTML output
                     $groups_html .= "<div class='groups-container'>";
-                    $groups_html .= "<h2>🎯 Generated Groups</h2>";
+                    $groups_html .= "<h2>🎯 Smart Group Generator</h2>";
                     $groups_html .= "<div class='groups-grid'>";
-
+                    
+                    // Display grouping method and condition info
+                    $method_labels = [
+                        'balanced' => 'Balanced Distribution',
+                        'gender_balanced' => 'Gender Balanced',
+                        'interest_based' => 'Interest-Based Grouping'
+                    ];
+                    $groups_html .= "<div class='info-banner' style='grid-column:1/-1; background:#e8f0fe; padding:1rem; border-radius:1rem; margin-bottom:1rem;'>";
+                    $groups_html .= "<i class='fas fa-chart-line'></i> <strong>Grouping Method:</strong> " . ($method_labels[$grouping_method] ?? 'Balanced') . " | ";
+                    $groups_html .= "<strong>Condition:</strong> " . ($condition_type == 'interested_only' ? 'Interested Students Only' : ($condition_type == 'not_interested' ? 'Not Interested Students' : 'All Students'));
+                    $groups_html .= "<br><i class='fas fa-users'></i> Total Students: " . $total_students . " | Groups: " . $group_count;
+                    $groups_html .= "</div>";
+                    
                     foreach($groups as $index => $group){
                         $groups_html .= "<div class='group-card'>";
                         $groups_html .= "<div class='group-header'>Group ".($index+1)." <span class='member-count'>(" . count($group) . " members)</span></div>";
-
+                        
                         $chief = null;
                         foreach($group as $member){
-                            if(strtolower(trim($member['interested'])) == 'yes'){
+                            if(strtolower(trim($member['interested'] ?? '')) == 'yes'){
                                 $chief = $member;
                                 break;
                             }
                         }
                         if(!$chief && !empty($group)) $chief = $group[0];
-
+                        
                         if($chief){
                             $groups_html .= "<div class='chief-badge'>👑 Chief: ".htmlspecialchars($chief['first_name'])." ".htmlspecialchars($chief['last_name'])."</div>";
                         }
-
+                        
                         $groups_html .= "<div class='member-list'>";
                         foreach($group as $member){
-                            $groups_html .= "<div class='member'>👤 ".htmlspecialchars($member['first_name'])." ".htmlspecialchars($member['last_name'])."</div>";
+                            $groups_html .= "<div class='member'>
+                                👤 " . htmlspecialchars($member['first_name']) . " " . htmlspecialchars($member['last_name']) . " 
+                                <span class='interest-badge'>" . (strtolower(trim($member['interested'] ?? '')) == 'yes' ? '⭐ Interested' : '📘 Regular') . "</span>
+                            </div>";
                         }
                         $groups_html .= "</div></div>";
                     }
-
+                    
                     $groups_html .= "</div>";
                     $groups_html .= "<div class='export-pdf'><button class='export-btn' onclick='window.print()'>📄 Export Groups to PDF</button></div>";
                     $groups_html .= "<div class='alert alert-info' style='margin-top:1rem;'>✅ Groups have been saved to the database. Students can now view their groups.</div>";
@@ -317,10 +430,9 @@ if(isset($_POST['generate'])){
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes, viewport-fit=cover">
-    <title>Teacher Dashboard · Group Formation</title>
+    <title>Teacher Dashboard · Smart Group Generator</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <style>
-        /* ... (keep all existing CSS exactly as before) ... */
         * {
             margin: 0;
             padding: 0;
@@ -410,7 +522,7 @@ if(isset($_POST['generate'])){
             display: block;
             color: var(--text-dark);
         }
-        select, input[type="number"], input[type="text"], input[type="datetime-local"] {
+        select, input[type="number"], input[type="text"], input[type="datetime-local"], textarea {
             width: 100%;
             padding: 0.8rem 1rem;
             border: 1px solid var(--border);
@@ -419,10 +531,33 @@ if(isset($_POST['generate'])){
             background: #fff;
             transition: 0.2s;
         }
-        select:focus, input:focus {
+        select:focus, input:focus, textarea:focus {
             outline: none;
             border-color: var(--accent);
             box-shadow: 0 0 0 3px rgba(44,139,112,0.2);
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            margin: 1rem 0;
+        }
+        .checkbox-group input {
+            width: auto;
+            transform: scale(1.1);
+        }
+        .radio-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 1rem;
+            margin-top: 0.5rem;
+        }
+        .radio-group label {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            font-weight: normal;
+            cursor: pointer;
         }
         .btn, .export-btn {
             background: var(--accent);
@@ -491,7 +626,7 @@ if(isset($_POST['generate'])){
         }
         .groups-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
             gap: 1.5rem;
             margin: 1.5rem 0;
         }
@@ -537,8 +672,27 @@ if(isset($_POST['generate'])){
             margin-top: 0.8rem;
         }
         .member {
-            padding: 0.3rem 0;
+            padding: 0.5rem 0;
             border-bottom: 1px dotted #e2e8f0;
+            font-size: 0.9rem;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .interest-badge {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 1rem;
+            background: #e0f2e9;
+            color: #2c8b70;
+        }
+        .info-banner {
+            background: #e8f0fe;
+            padding: 1rem;
+            border-radius: 1rem;
+            margin-bottom: 1rem;
             font-size: 0.9rem;
         }
         .export-pdf {
@@ -546,7 +700,7 @@ if(isset($_POST['generate'])){
             margin-top: 2rem;
         }
         @media print {
-            .dashboard-header, .form-card, .alert, .data-section, .export-pdf button, .logout-btn {
+            .dashboard-header, .form-card, .alert, .data-section, .export-pdf button, .logout-btn, .info-banner {
                 display: none !important;
             }
             .groups-container {
@@ -577,17 +731,14 @@ if(isset($_POST['generate'])){
             .form-card, .groups-container { padding: 1.2rem; }
             .btn, .export-btn { width: 100%; justify-content: center; }
             .data-table th, .data-table td { padding: 0.6rem; font-size: 0.85rem; }
+            .radio-group { flex-direction: column; gap: 0.5rem; }
         }
         @media (max-width: 480px) {
             .groups-grid { grid-template-columns: 1fr; }
             .group-header { font-size: 1rem; }
-            .member-count { font-size: 0.7rem; }
-            .chief-badge { font-size: 0.75rem; }
-            .member { font-size: 0.8rem; }
-            input, select, .btn { font-size: 0.9rem; padding: 0.7rem 1rem; }
+            .member { flex-direction: column; align-items: flex-start; }
         }
         .btn:active, .export-btn:active, .logout-btn:active { transform: scale(0.96); }
-        * { transition: all 0.2s ease; }
     </style>
 </head>
 <body>
@@ -631,7 +782,7 @@ if(isset($_POST['generate'])){
 
     <!-- Smart Group Generator Card -->
     <div class="form-card">
-        <h2><i class="fas fa-users"></i> Smart Group Generator</h2>
+        <h2><i class="fas fa-brain"></i> Smart Group Generator</h2>
         <form method="POST">
             <div class="form-group">
                 <label>Selected Table:</label>
@@ -640,15 +791,38 @@ if(isset($_POST['generate'])){
                 </div>
                 <input type="hidden" name="generate_table" value="students">
             </div>
+            
+            <!-- View Table Data Button -->
             <div class="form-group">
                 <button type="submit" name="view_table" class="btn btn-secondary"><i class="fas fa-eye"></i> View Table Data</button>
             </div>
 
             <?php if(!empty($table_data)) echo $table_data; ?>
 
+            <!-- Grouping Conditions -->
             <div class="form-group">
-                <input type="number" name="group_size" min="2" max="10" placeholder="Group size (2–10)">
+                <label><i class="fas fa-filter"></i> Student Filter Condition</label>
+                <div class="radio-group">
+                    <label><input type="radio" name="condition_type" value="all" checked> All Students</label>
+                    <label><input type="radio" name="condition_type" value="interested_only"> Interested Only (Yes)</label>
+                    <label><input type="radio" name="condition_type" value="not_interested"> Not Interested Only</label>
+                </div>
             </div>
+            
+            <div class="form-group">
+                <label><i class="fas fa-chart-pie"></i> Grouping Strategy</label>
+                <select name="grouping_method">
+                    <option value="balanced">Balanced Distribution (Default)</option>
+                    <option value="gender_balanced">Gender Balanced Groups</option>
+                    <option value="interest_based">Interest-Based Grouping</option>
+                </select>
+            </div>
+            
+            <div class="form-group">
+                <label><i class="fas fa-users"></i> Group Size (2-10 members per group)</label>
+                <input type="number" name="group_size" min="2" max="10" placeholder="Enter group size">
+            </div>
+            
             <div class="form-group">
                 <button type="submit" name="generate" class="btn"><i class="fas fa-magic"></i> Generate Groups</button>
             </div>
